@@ -1,8 +1,15 @@
 #!/usr/bin/env python3
 
+from ecal.core.subscriber import MessageSubscriber
+import transformations as tf
+import tf2_ros
+from geometry_msgs.msg import TransformStamped
+from nav_msgs.msg import Odometry
+from rclpy.node import Node
+import rclpy
+import odometry3d_capnp as eCALOdometry3d
 import sys
 import time
-import threading
 import argparse
 
 import capnp
@@ -16,64 +23,55 @@ current_path = str(pathlib.Path(__file__).parent.resolve())
 
 print("working in path " + current_path)
 
-capnp.add_import_hook([current_path + '/../src/capnp', current_path + '/ecal-common/src/capnp'])
+capnp.add_import_hook([current_path + '/../src/capnp',
+                      current_path + '/ecal-common/src/capnp'])
 
-import odometry3d_capnp as eCALOdometry3d
-
-import rospy
-from nav_msgs.msg import Odometry
-from geometry_msgs.msg import TransformStamped
-import tf2_ros
-
-import tf
-
-
-from ecal.core.subscriber import MessageSubscriber
 
 class ByteSubscriber(MessageSubscriber):
-  """Specialized publisher subscribes to raw bytes
-  """
-  def __init__(self, name):
-    topic_type = "base:byte"
-    super(ByteSubscriber, self).__init__(name, topic_type)
-    self.callback = None
-
-  def receive(self, timeout=0):
-    """ receive subscriber content with timeout
-
-    :param timeout: receive timeout in ms
-
+    """Specialized publisher subscribes to raw bytes
     """
-    ret, msg, time = self.c_subscriber.receive(timeout)
-    return ret, msg, time
 
-  def set_callback(self, callback):
-    """ set callback function for incoming messages
+    def __init__(self, name):
+        topic_type = "base:byte"
+        super(ByteSubscriber, self).__init__(name, topic_type)
+        self.callback = None
 
-    :param callback: python callback function (f(topic_name, msg, time))
+    def receive(self, timeout=0):
+        """ receive subscriber content with timeout
 
-    """
-    self.callback = callback
-    self.c_subscriber.set_callback(self._on_receive)
+        :param timeout: receive timeout in ms
 
-  def rem_callback(self, callback):
-    """ remove callback function for incoming messages
+        """
+        ret, msg, time = self.c_subscriber.receive(timeout)
+        return ret, msg, time
 
-    :param callback: python callback function (f(topic_name, msg, time))
+    def set_callback(self, callback):
+        """ set callback function for incoming messages
 
-    """
-    self.c_subscriber.rem_callback(self._on_receive)
-    self.callback = None
+        :param callback: python callback function (f(topic_name, msg, time))
 
-  def _on_receive(self, topic_name, msg, time):
-    self.callback(topic_name, msg, time)    
+        """
+        self.callback = callback
+        self.c_subscriber.set_callback(self._on_receive)
+
+    def rem_callback(self, callback):
+        """ remove callback function for incoming messages
+
+        :param callback: python callback function (f(topic_name, msg, time))
+
+        """
+        self.c_subscriber.rem_callback(self._on_receive)
+        self.callback = None
+
+    def _on_receive(self, topic_name, msg, time):
+        self.callback(topic_name, msg, time)
 
 
-class RosOdometryPublisher:
+class RosOdometryPublisher(Node):
 
     def publish_tf(self, tf_msg):
         if not self.no_tf_publisher:
-                self.broadcaster.sendTransform(tf_msg)
+            self.broadcaster.sendTransform(tf_msg)
 
     def publish_static_tf(self, tf_msg):
         # we probably should always publish tf transform
@@ -81,20 +79,20 @@ class RosOdometryPublisher:
         #         self.static_broadcaster.sendTransform(tf_msg)
         self.static_broadcaster.sendTransform(tf_msg)
 
-    def __init__(self, ros_tf_prefix : str, topic : str, use_monotonic : bool, no_tf_publisher : bool) -> None:
+    def __init__(self, ros_tf_prefix: str, topic: str, no_tf_publisher: bool) -> None:
+        super().__init__('my_node_name')
         self.first_message = True
-        self.ros_odom_pub = rospy.Publisher(topic, Odometry, queue_size=10)
-        self.use_monotonic = use_monotonic
+        self.ros_odom_pub = self.create_publisher(Odometry, topic, 10)
         self.no_tf_publisher = no_tf_publisher
         self.ros_tf_prefix = ros_tf_prefix + "/"
 
-        print(f"ecal-ros bridge using monotonic = {use_monotonic}")
         print(f"ecal-ros bridge publishing tf = {not no_tf_publisher}")
-        print(f"ecal-ros bridge publish topic = {topic}, with tf prefix {self.ros_tf_prefix}")
+        print(
+            f"ecal-ros bridge publish topic = {topic}, with tf prefix {self.ros_tf_prefix}")
 
         # static transforms
-        self.static_broadcaster = tf2_ros.StaticTransformBroadcaster()
-        self.broadcaster = tf2_ros.TransformBroadcaster()
+        self.static_broadcaster = tf2_ros.StaticTransformBroadcaster(self)
+        self.broadcaster = tf2_ros.TransformBroadcaster(self)
 
         if topic.endswith("_ned"):
             self.isNED = True
@@ -102,22 +100,19 @@ class RosOdometryPublisher:
             self.isNED = False
 
         self.tf_msg_odom_ned = TransformStamped()
-        if self.use_monotonic:
-            self.tf_msg_odom_ned.header.stamp = rospy.Time.from_sec(time.monotonic())
-        else:
-            self.tf_msg_odom_ned.header.stamp = rospy.Time.now()
+        self.tf_msg_odom_ned.header.stamp = self.get_clock().now().to_msg()
         self.tf_msg_odom_ned.header.frame_id = self.ros_tf_prefix + "odom"
         self.tf_msg_odom_ned.child_frame_id = self.ros_tf_prefix + "odom_ned"
 
-        self.tf_msg_odom_ned.transform.translation.x = 0
-        self.tf_msg_odom_ned.transform.translation.y = 0
-        self.tf_msg_odom_ned.transform.translation.z = 0
+        self.tf_msg_odom_ned.transform.translation.x = 0.
+        self.tf_msg_odom_ned.transform.translation.y = 0.
+        self.tf_msg_odom_ned.transform.translation.z = 0.
 
-        # R_ned_nwu = np.array ([[1, 0, 0], [0, -1, 0], [0, 0, -1]])
         T_nwu_ned = np.identity(4)
-        R_nwu_ned = np.array ([[1, 0, 0], [0, -1, 0], [0, 0, -1]])
+        R_nwu_ned = np.array([[1, 0, 0], [0, -1, 0], [0, 0, -1]])
         T_nwu_ned[:3, :3] = R_nwu_ned
         quat = tf.transformations.quaternion_from_matrix(T_nwu_ned)
+        print("init quat: ", quat)
 
         self.tf_msg_odom_ned.transform.rotation.x = quat[0]
         self.tf_msg_odom_ned.transform.rotation.y = quat[1]
@@ -127,7 +122,6 @@ class RosOdometryPublisher:
         time.sleep(0.5)
 
         self.publish_static_tf(self.tf_msg_odom_ned)
-        
 
         time.sleep(0.1)
 
@@ -146,24 +140,21 @@ class RosOdometryPublisher:
         self.tf_msg_odom_nwu.header.frame_id = self.ros_tf_prefix + "odom"
         self.tf_msg_odom_nwu.child_frame_id = self.ros_tf_prefix + "odom_nwu"
 
-        self.tf_msg_odom_nwu.transform.translation.x = 0
-        self.tf_msg_odom_nwu.transform.translation.y = 0
-        self.tf_msg_odom_nwu.transform.translation.z = 0
+        self.tf_msg_odom_nwu.transform.translation.x = 0.
+        self.tf_msg_odom_nwu.transform.translation.y = 0.
+        self.tf_msg_odom_nwu.transform.translation.z = 0.
 
-        self.tf_msg_odom_nwu.transform.rotation.x = 0
-        self.tf_msg_odom_nwu.transform.rotation.y = 0
-        self.tf_msg_odom_nwu.transform.rotation.z = 0
-        self.tf_msg_odom_nwu.transform.rotation.w = 1
+        self.tf_msg_odom_nwu.transform.rotation.x = 0.
+        self.tf_msg_odom_nwu.transform.rotation.y = 0.
+        self.tf_msg_odom_nwu.transform.rotation.z = 0.
+        self.tf_msg_odom_nwu.transform.rotation.w = 1.
 
         self.publish_static_tf(self.tf_msg_odom_nwu)
-
-
-        
 
     def callback(self, topic_name, msg, time_ecal):
 
         # need to remove the .decode() function within the Python API of ecal.core.subscriber ByteSubscriber
-        
+
         with eCALOdometry3d.Odometry3d.from_bytes(msg) as odometryMsg:
 
             if self.first_message:
@@ -172,34 +163,30 @@ class RosOdometryPublisher:
                 print(f"velocityFrame = {odometryMsg.velocityFrame}")
                 self.first_message = False
 
-            if odometryMsg.header.seq % 100 == 0:
+            if odometryMsg.header.seq % 1 == 0:
+                print(f"============================")
                 print(f"seq = {odometryMsg.header.seq}")
-                print(f"latency device = {odometryMsg.header.latencyDevice / 1e6} ms")
-                print(f"latency host = {odometryMsg.header.latencyHost / 1e6} ms")
-                print(f"position = {odometryMsg.pose.position.x}, {odometryMsg.pose.position.y}, {odometryMsg.pose.position.z}")
-                print(f"orientation = {odometryMsg.pose.orientation.w}, {odometryMsg.pose.orientation.x}, {odometryMsg.pose.orientation.y}, {odometryMsg.pose.orientation.z}")
-                
+                print(
+                    f"latency device = {odometryMsg.header.latencyDevice / 1e6} ms")
+                print(
+                    f"latency host = {odometryMsg.header.latencyHost / 1e6} ms")
+                print(
+                    f"position = {odometryMsg.pose.position.x}, {odometryMsg.pose.position.y}, {odometryMsg.pose.position.z}")
+                print(
+                    f"orientation = {odometryMsg.pose.orientation.w}, {odometryMsg.pose.orientation.x}, {odometryMsg.pose.orientation.y}, {odometryMsg.pose.orientation.z}")
+                print(f"============================\n")
 
-                if self.use_monotonic:
-                    self.tf_msg_odom_ned.header.stamp = rospy.Time.from_sec(time.monotonic())
-                    self.tf_msg_base_link.header.stamp = rospy.Time.from_sec(time.monotonic())
-                    self.tf_msg_odom_nwu.header.stamp = rospy.Time.from_sec(time.monotonic())
-                else:
-                    self.tf_msg_odom_ned.header.stamp = rospy.Time.now()
-                    self.tf_msg_base_link.header.stamp = rospy.Time.now()
-                    self.tf_msg_odom_nwu.header.stamp = rospy.Time.now()
+                self.tf_msg_odom_ned.header.stamp = self.get_clock().now().to_msg()
+                self.tf_msg_base_link.header.stamp = self.get_clock().now().to_msg()
+                self.tf_msg_odom_nwu.header.stamp = self.get_clock().now().to_msg()
 
                 self.publish_static_tf(self.tf_msg_odom_ned)
                 self.publish_static_tf(self.tf_msg_base_link)
                 self.publish_static_tf(self.tf_msg_odom_nwu)
 
-            ros_msg = Odometry();
-            ros_msg.header.seq = odometryMsg.header.seq
+            ros_msg = Odometry()
 
-            if self.use_monotonic:
-                ros_msg.header.stamp = rospy.Time.from_sec(odometryMsg.header.stamp / 1.0e9)
-            else:
-                ros_msg.header.stamp = rospy.Time.now() #.from_sec(odometryMsg.header.stamp / 1.0e9)
+            ros_msg.header.stamp = self.get_clock().now().to_msg()
 
             if self.isNED:
                 ros_msg.header.frame_id = self.ros_tf_prefix + "odom_ned"
@@ -208,8 +195,8 @@ class RosOdometryPublisher:
                 ros_msg.header.frame_id = self.ros_tf_prefix + "odom"
                 ros_msg.child_frame_id = self.ros_tf_prefix + "base_link"
 
-            ros_msg.pose.pose.position.x = odometryMsg.pose.position.x
-            ros_msg.pose.pose.position.y = odometryMsg.pose.position.y
+            ros_msg.pose.pose.position.x = -odometryMsg.pose.position.x
+            ros_msg.pose.pose.position.y = -odometryMsg.pose.position.y
             ros_msg.pose.pose.position.z = odometryMsg.pose.position.z
 
             ros_msg.pose.pose.orientation.w = odometryMsg.pose.orientation.w
@@ -240,46 +227,46 @@ class RosOdometryPublisher:
             self.publish_tf(tf_msg)
 
 
-def main():  
-
+def main():
     # print eCAL version and date
     print("eCAL {} ({})\n".format(ecal_core.getversion(), ecal_core.getdate()))
 
-    topic_ecal = "S0/vio_odom"
-    topic_ros = "/basalt/odom_ned"
+    topic_ecal = "S1/vio_odom"
+    topic_ros = "/basalt/odom"
 
     parser = argparse.ArgumentParser()
-    parser.add_argument('ecal_topic_in', nargs='?', help="topic of ecal", default=topic_ecal)
-    parser.add_argument('ros_topic_out', nargs='?', help="topic of ros", default=topic_ros)
-    parser.add_argument('--ros_tf_prefix', type=str, default='S0')
-    parser.add_argument('--monotonic_time', action="store_true")
+    parser.add_argument('ecal_topic_in', nargs='?',
+                        help="topic of ecal", default=topic_ecal)
+    parser.add_argument('ros_topic_out', nargs='?',
+                        help="topic of ros", default=topic_ros)
+    parser.add_argument('--ros_tf_prefix', type=str, default='S1')
     parser.add_argument('--no_tf_publisher', action="store_true")
     args = parser.parse_known_args()[0]
 
     args.ros_topic_out = "/" + args.ros_tf_prefix + args.ros_topic_out
-    
+
     # initialize eCAL API
     ecal_core.initialize(sys.argv, "test_odometry_sub")
-    
+
     # set process state
     ecal_core.set_process_state(1, 1, "I feel good")
 
-    rospy.init_node("ros_odometry_publisher")
+    rclpy.init()
 
-    ros_odometry_pub = RosOdometryPublisher(args.ros_tf_prefix, args.ros_topic_out, args.monotonic_time, args.no_tf_publisher)
+    ros_odometry_pub = RosOdometryPublisher(
+        args.ros_tf_prefix, args.ros_topic_out, args.no_tf_publisher)
 
     # create subscriber and connect callback
     print(f"ecal-ros bridge subscribe topic: {args.ecal_topic_in}")
     sub = ByteSubscriber(args.ecal_topic_in)
     sub.set_callback(ros_odometry_pub.callback)
-    
+
     # idle main thread
-    # while ecal_core.ok():
-    #     time.sleep(0.1)
-    rospy.spin()
-    
+    rclpy.spin(ros_odometry_pub)
+
     # finalize eCAL API
     ecal_core.finalize()
+
 
 if __name__ == "__main__":
     main()
