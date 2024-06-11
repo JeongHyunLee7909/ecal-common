@@ -7,7 +7,6 @@ from geometry_msgs.msg import TransformStamped
 from nav_msgs.msg import Odometry
 from rclpy.node import Node
 import rclpy
-import odometry3d_capnp as eCALOdometry3d
 import sys
 import time
 import argparse
@@ -26,6 +25,7 @@ print("working in path " + current_path)
 capnp.add_import_hook([current_path + '/../src/capnp',
                       current_path + '/ecal-common/src/capnp'])
 
+import odometry3d_capnp as eCALOdometry3d
 
 class ByteSubscriber(MessageSubscriber):
     """Specialized publisher subscribes to raw bytes
